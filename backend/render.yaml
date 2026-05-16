@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: facet-backend
+    env: python
+    rootDir: backend
+    buildCommand: pip install -e .
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port 10000
+    plan: free
+    region: oregon
+    envVars:
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: COLLECTION_NAME
+        value: company_docs
+      - key: CORS_ORIGIN
+        sync: false
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      - key: EMBED_MODEL
+        value: sentence-transformers/all-MiniLM-L6-v2
