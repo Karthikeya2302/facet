@@ -13,7 +13,7 @@ dependencies = [
     "sentence-transformers",
     "groq",
     "llama-index",
-    "llama-index-retrievers-bm25",
+    "rank-bm25",
     "pydantic",
     "pydantic-settings",
     "python-dotenv",
