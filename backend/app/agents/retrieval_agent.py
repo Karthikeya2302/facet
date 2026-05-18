@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from rank_bm25 import BM25Okapi
 from qdrant_client.models import FieldCondition, Filter, MatchAny
 
 from app.config import settings
 from app.embeddings import embed
+from app.llm import chat
 from app.qdrant_client import get_client
 from app.schemas import Chunk
+
+_REWRITE_PROMPT = (
+    "The user asked a question that didn't return useful results. Rewrite it as a "
+    "more specific, retrieval-friendly query. Keep it short.\n"
+    'Return JSON: {{"q": "..."}}\n'
+    "Question: {query}"
+)
 
 
 def _tokenize(text: str) -> list[str]:
@@ -60,8 +69,20 @@ class RetrievalAgent:
         ]
 
     async def _rewrite_vector(self, role: str | None, query: str, k: int) -> list[Chunk]:
-        # LLM rewrite wired in phase 5; delegate to _vector for now
-        return await self._vector(role, query, k)
+        rewritten = query
+        try:
+            messages = [
+                {
+                    "role": "user",
+                    "content": _REWRITE_PROMPT.format(query=query),
+                }
+            ]
+            raw = await chat(messages, json_mode=True, temperature=0.0)
+            data = json.loads(raw)
+            rewritten = data.get("q") or query
+        except Exception:
+            pass
+        return await self._vector(role, rewritten, k)
 
     async def _hybrid(self, role: str | None, query: str, k: int) -> list[Chunk]:
         if role is None:
