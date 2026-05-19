@@ -10,14 +10,23 @@ from app.schemas import Chunk
 
 class AccessAgent:
     async def check(self, query: str, current_role: str) -> str | None:
-        """Returns the higher role at which content exists, or None."""
+        """Returns the most-restrictive higher role at which content exists, or None.
+
+        Searches the top-k unfiltered results and returns the highest-ranked
+        source_role found above current_role.  Using max() across all k chunks
+        (rather than just chunks[0]) avoids false-low answers when a semantically
+        adjacent but lower-classified document ranks above the actual restricted one.
+        """
         chunks = await self._unfiltered_search(query, k=3)
         if not chunks:
             return None
-        top_role = chunks[0].source_role
-        if ROLE_RANK[top_role] > ROLE_RANK[current_role]:
-            return top_role
-        return None
+        higher_roles = [
+            c.source_role for c in chunks
+            if ROLE_RANK[c.source_role] > ROLE_RANK[current_role]
+        ]
+        if not higher_roles:
+            return None
+        return max(higher_roles, key=lambda r: ROLE_RANK[r])
 
     async def _unfiltered_search(self, query: str, k: int) -> list[Chunk]:
         # Security carve-out: this is the ONLY place in the codebase that
