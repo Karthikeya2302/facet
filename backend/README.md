@@ -57,6 +57,34 @@ Tests require a `.env` with valid credentials, or set env vars directly:
 QDRANT_URL=... QDRANT_API_KEY=... GROQ_API_KEY=... CORS_ORIGIN=http://localhost:3000 pytest
 ```
 
+## Smoke test (local)
+
+Start the dev server:
+
+```bash
+uvicorn app.main:app --reload --port 10000
+```
+
+Then in a separate terminal:
+
+```bash
+# CEO can see Project Nightingale
+curl -N -X POST http://localhost:10000/query \
+  -H "Content-Type: application/json" \
+  -d '{"role": "ceo", "query": "what is project nightingale"}'
+
+# Employee gets access_denied
+curl -N -X POST http://localhost:10000/query \
+  -H "Content-Type: application/json" \
+  -d '{"role": "employee", "query": "what is project nightingale"}'
+
+# Health check
+curl http://localhost:10000/health
+```
+
+Each `/query` response is a `text/event-stream` where every frame is `data: {json}\n\n`.
+The `done` event signals end of stream. See §7 of `ARCHITECTURE.md` for the full event protocol.
+
 ## Deploy to Render
 
 The `render.yaml` blueprint is in this directory. Render expects blueprints at
