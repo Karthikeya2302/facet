@@ -19,6 +19,7 @@ import {
   Sparkles,
   FileCheck,
   Wrench,
+  Zap,
 } from "lucide-react";
 import {
   roles,
@@ -27,6 +28,7 @@ import {
   initialAgents,
   SuggestedChip,
 } from "@/lib/roles";
+import { streamQuery } from "@/lib/sse";
 
 type MessageType = "user" | "assistant" | "access-denied";
 
@@ -37,6 +39,8 @@ interface Message {
   restrictedLevel?: string;
 }
 
+type CacheStatus = "hit" | "miss" | "write" | null;
+
 const roleIcons: Record<RoleId, typeof Crown> = {
   ceo: Crown,
   hr: Users,
@@ -46,11 +50,19 @@ const roleIcons: Record<RoleId, typeof Crown> = {
 
 const agentIcons: Record<string, typeof Search> = {
   retrieval: Search,
+  generator: Sparkles,
   grader: FileCheck,
   healer: Wrench,
   access: Shield,
   answer: Sparkles,
 };
+
+function findLastIdx<T>(arr: T[], pred: (x: T) => boolean): number {
+  for (let i = arr.length - 1; i >= 0; i--) {
+    if (pred(arr[i])) return i;
+  }
+  return -1;
+}
 
 export default function ChatPage() {
   const router = useRouter();
@@ -59,6 +71,8 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
   const [agents, setAgents] = useState<AgentState[]>(initialAgents);
+  const [cacheStatus, setCacheStatus] = useState<CacheStatus>(null);
+  const [streamError, setStreamError] = useState<string | null>(null);
   const [showInitialChips, setShowInitialChips] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -80,124 +94,146 @@ export default function ChatPage() {
     router.push("/");
   };
 
-  const simulateAgentPipeline = async (
-    isLocked: boolean
-  ): Promise<"success" | "denied"> => {
-    const agentSequence = [
-      {
-        id: "retrieval",
-        description: "vector search — 4 chunks",
-        delay: 600,
-      },
-      { id: "grader", description: "relevance check — 3/4 passed", delay: 500 },
-      {
-        id: "healer",
-        description: "no healing needed",
-        delay: 400,
-        healerAction: "skip",
-        healerReasoning: "All retrieved chunks are relevant",
-      },
-      {
-        id: "access",
-        description: isLocked ? "permission denied" : "access granted",
-        delay: 500,
-        willFail: isLocked,
-      },
-      {
-        id: "answer",
-        description: isLocked ? "blocked" : "generating response",
-        delay: 600,
-      },
-    ];
-
-    // Reset agents to pending
-    setAgents(
-      initialAgents.map((a) => ({ ...a, status: "pending", description: "Waiting..." }))
-    );
-
-    for (const step of agentSequence) {
-      await new Promise((resolve) => setTimeout(resolve, step.delay));
-
-      setAgents((prev) =>
-        prev.map((agent) => {
-          if (agent.id === step.id) {
-            const status = step.willFail ? "failed" : "passed";
-            return {
-              ...agent,
-              description: step.description,
-              status,
-              healerAction: step.healerAction,
-              healerReasoning: step.healerReasoning,
-            };
-          }
-          return agent;
-        })
-      );
-
-      if (step.willFail) {
-        // Mark remaining agents as idle
-        await new Promise((resolve) => setTimeout(resolve, 200));
-        setAgents((prev) =>
-          prev.map((agent) => {
-            if (
-              agent.status === "pending" ||
-              (agent.id !== step.id && agent.status === "idle")
-            ) {
-              return { ...agent, status: "idle", description: "Skipped" };
-            }
-            return agent;
-          })
-        );
-        return "denied";
-      }
-    }
-
-    return "success";
-  };
-
-  const handleSubmit = async (question: string, chip?: SuggestedChip) => {
+  const handleSubmit = (question: string, _chip?: SuggestedChip) => {
     if (!question.trim() || isProcessing || !role) return;
 
-    const isLocked = chip?.locked ?? false;
     setShowInitialChips(false);
     setIsProcessing(true);
+    setStreamError(null);
 
-    // Add user message
-    const userMessage: Message = {
-      id: Date.now().toString(),
-      type: "user",
-      content: question,
-    };
-    setMessages((prev) => [...prev, userMessage]);
+    setMessages((prev) => [
+      ...prev,
+      { id: Date.now().toString(), type: "user", content: question },
+    ]);
     setInput("");
 
-    // Simulate agent pipeline
-    const result = await simulateAgentPipeline(isLocked);
+    // reset pipeline tracker
+    setAgents([]);
+    setCacheStatus(null);
 
-    // Add response
-    if (result === "denied") {
-      const deniedMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        type: "access-denied",
-        content: "Access denied — content exists at CEO level",
-        restrictedLevel: "CEO",
-      };
-      setMessages((prev) => [...prev, deniedMessage]);
-    } else {
-      const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        type: "assistant",
-        content: `Based on your ${roles[role].label} access level, here's what I found: This is a placeholder response for "${question}". The real backend will provide actual answers from your knowledge base.`,
-      };
-      setMessages((prev) => [...prev, assistantMessage]);
-    }
+    streamQuery(
+      role,
+      question,
+      (event) => {
+        switch (event.type) {
+          case "cache_hit":
+            setCacheStatus("hit");
+            break;
 
-    setIsProcessing(false);
+          case "cache_miss":
+            setCacheStatus("miss");
+            break;
 
-    // Reset agents after a delay
-    setTimeout(() => {
-      setAgents(initialAgents);
-    }, 2000);
+          case "cache_write":
+            setCacheStatus("write");
+            break;
+
+          case "agent_start":
+            setAgents((prev) => [
+              ...prev,
+              {
+                id: event.agent,
+                label: event.label,
+                description: event.label,
+                status: "pending",
+              },
+            ]);
+            break;
+
+          case "agent_done":
+            setAgents((prev) => {
+              const idx = findLastIdx(prev, (a) => a.id === event.agent);
+              if (idx === -1) return prev;
+              const next = [...prev];
+              next[idx] = { ...next[idx], description: event.label, status: "pending" };
+              return next;
+            });
+            break;
+
+          case "agent_pass":
+            setAgents((prev) => {
+              const idx = findLastIdx(prev, (a) => a.id === event.agent);
+              if (idx === -1) return prev;
+              const next = [...prev];
+              next[idx] = { ...next[idx], description: event.label, status: "passed" };
+              return next;
+            });
+            break;
+
+          case "agent_fail":
+            setAgents((prev) => {
+              const idx = findLastIdx(prev, (a) => a.id === event.agent);
+              if (idx === -1) return prev;
+              const next = [...prev];
+              next[idx] = { ...next[idx], description: event.label, status: "failed" };
+              return next;
+            });
+            break;
+
+          case "healer_decision":
+            setAgents((prev) => {
+              const idx = findLastIdx(prev, (a) => a.id === "healer");
+              if (idx === -1) return prev;
+              const next = [...prev];
+              next[idx] = {
+                ...next[idx],
+                healerAction: event.action,
+                healerReasoning: event.reasoning,
+              };
+              return next;
+            });
+            break;
+
+          case "answer":
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: Date.now().toString(),
+                type: "assistant",
+                content: event.text,
+              },
+            ]);
+            break;
+
+          case "access_denied":
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: Date.now().toString(),
+                type: "access-denied",
+                content: `Access denied — content exists at ${event.found_at_role} level`,
+                restrictedLevel: event.found_at_role,
+              },
+            ]);
+            break;
+
+          case "no_info":
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: Date.now().toString(),
+                type: "assistant",
+                content: "I couldn't find that information.",
+              },
+            ]);
+            break;
+
+          case "error":
+            setStreamError(event.message);
+            break;
+
+          default:
+            break;
+        }
+      },
+      () => {
+        setIsProcessing(false);
+      },
+      (err) => {
+        setStreamError(err instanceof Error ? err.message : "Connection error");
+        setIsProcessing(false);
+      }
+    );
   };
 
   if (!role) {
@@ -232,7 +268,7 @@ export default function ChatPage() {
         </div>
         <button
           onClick={handleLogout}
-          className="flex items-center gap-2 px-3 py-1.5 text-sm text-zinc-400 hover:text-white 
+          className="flex items-center gap-2 px-3 py-1.5 text-sm text-zinc-400 hover:text-white
             rounded-lg hover:bg-zinc-800 transition-colors"
         >
           <LogOut className="w-4 h-4" />
@@ -260,7 +296,7 @@ export default function ChatPage() {
                     key={index}
                     onClick={() => handleSubmit(chip.question, chip)}
                     disabled={isProcessing}
-                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-full 
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-full
                       border transition-all duration-200
                       ${
                         chip.locked
@@ -331,7 +367,7 @@ export default function ChatPage() {
                 onChange={(e) => setInput(e.target.value)}
                 placeholder="Ask a question..."
                 disabled={isProcessing}
-                className="flex-1 px-4 py-2.5 bg-zinc-800/50 border border-zinc-700/50 rounded-xl 
+                className="flex-1 px-4 py-2.5 bg-zinc-800/50 border border-zinc-700/50 rounded-xl
                   text-zinc-200 placeholder-zinc-500 text-sm
                   focus:outline-none focus:ring-2 focus:ring-zinc-600 focus:border-transparent
                   disabled:opacity-50"
@@ -346,6 +382,9 @@ export default function ChatPage() {
                 <Send className="w-4 h-4" />
               </button>
             </form>
+            {streamError && (
+              <p className="mt-2 text-xs text-red-400">{streamError}</p>
+            )}
           </div>
         </div>
 
@@ -357,12 +396,32 @@ export default function ChatPage() {
               Live Pipeline
             </h3>
 
+            {/* Cache status pill */}
+            {cacheStatus && (
+              <div
+                className={`mb-3 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${
+                  cacheStatus === "hit"
+                    ? "bg-emerald-900/30 text-emerald-400 border-emerald-500/30"
+                    : cacheStatus === "write"
+                      ? "bg-emerald-900/20 text-emerald-500 border-emerald-500/20"
+                      : "bg-zinc-800 text-zinc-400 border-zinc-700/50"
+                }`}
+              >
+                <Zap className="w-3 h-3" />
+                {cacheStatus === "hit"
+                  ? "Cache hit"
+                  : cacheStatus === "write"
+                    ? "Cached"
+                    : "Cache miss"}
+              </div>
+            )}
+
             <div className="space-y-3">
-              {agents.map((agent) => {
+              {agents.map((agent, i) => {
                 const AgentIcon = agentIcons[agent.id] || Database;
                 return (
                   <div
-                    key={agent.id}
+                    key={`${agent.id}-${i}`}
                     className={`p-3 rounded-lg border transition-all duration-300 ${
                       agent.status === "pending"
                         ? "bg-zinc-800/50 border-zinc-700/50"
@@ -419,32 +478,29 @@ export default function ChatPage() {
                     </p>
 
                     {/* Healer Agent Reasoning */}
-                    {agent.id === "healer" &&
-                      agent.healerAction &&
-                      agent.status === "passed" && (
-                        <div className="mt-2 pl-2 border-l-2 border-zinc-700">
-                          <p className="text-xs text-zinc-500">
-                            Action:{" "}
-                            <span className="text-zinc-400">
-                              {agent.healerAction}
-                            </span>
-                          </p>
-                          <p className="text-xs text-zinc-600 italic">
-                            {agent.healerReasoning}
-                          </p>
-                        </div>
-                      )}
+                    {agent.id === "healer" && agent.healerAction && (
+                      <div className="mt-2 pl-2 border-l-2 border-zinc-700">
+                        <p className="text-xs text-zinc-500">
+                          Action:{" "}
+                          <span className="text-zinc-400">
+                            {agent.healerAction}
+                          </span>
+                        </p>
+                        <p className="text-xs text-zinc-600 italic">
+                          {agent.healerReasoning}
+                        </p>
+                      </div>
+                    )}
                   </div>
                 );
               })}
             </div>
 
-            {!isProcessing &&
-              agents.every((a) => a.status === "idle") && (
-                <p className="text-center text-zinc-600 text-xs mt-4">
-                  Waiting for a query...
-                </p>
-              )}
+            {!isProcessing && agents.length === 0 && (
+              <p className="text-center text-zinc-600 text-xs mt-4">
+                Waiting for a query...
+              </p>
+            )}
           </div>
         </div>
       </div>
