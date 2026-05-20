@@ -8,7 +8,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.config import settings
 from app.qdrant_client import count
-from app.rag.orchestrator import run_query
+#from app.rag.orchestrator import run_query
 from app.schemas import QueryRequest
 
 app = FastAPI(title="Facet")
@@ -33,3 +33,6 @@ async def query(req: QueryRequest) -> EventSourceResponse:
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok", "qdrant_chunks": count()}
+
+async def run_query(role: str, query: str):
+    yield {"data": "mock"}
