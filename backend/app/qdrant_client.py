@@ -24,10 +24,16 @@ def ensure_collection() -> str:
     name = settings.COLLECTION_NAME
 
     existing = {c.name for c in client.get_collections().collections}
+    if name in existing:
+        info = client.get_collection(name)
+        if info.config.params.vectors.size != 768:
+            client.delete_collection(name)
+            existing.discard(name)
+
     if name not in existing:
         client.create_collection(
             collection_name=name,
-            vectors_config=VectorParams(size=384, distance=Distance.COSINE),
+            vectors_config=VectorParams(size=768, distance=Distance.COSINE),
         )
 
     try:

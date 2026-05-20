@@ -10,7 +10,6 @@ dependencies = [
     "fastapi",
     "uvicorn[standard]",
     "qdrant-client",
-    "sentence-transformers",
     "groq",
     "llama-index",
     "rank-bm25",
